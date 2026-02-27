@@ -97,6 +97,11 @@ pub mod ffi {
         device_index: u32,
     }
 
+    extern "Rust" {
+        /// Allocate a zero-initialized Vec<u8> of `size` bytes on the Rust heap.
+        fn new_output_buffer(size: usize) -> Vec<u8>;
+    }
+
     unsafe extern "C++" {
         include!("libinfer/src/engine.h");
 
@@ -212,6 +217,10 @@ impl Engine {
             max: vs[2],
         }
     }
+}
+
+fn new_output_buffer(size: usize) -> Vec<u8> {
+    vec![0u8; size]
 }
 
 // Engine is not thread safe, but can be moved between threads.

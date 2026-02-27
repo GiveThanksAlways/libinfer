@@ -101,12 +101,25 @@ Engine::Engine(const Options &options)
 }
 
 Engine::~Engine() {
-  // Free the GPU memory
+  // Free the GPU memory. Do not use checkCudaErrorCode here. Destructors
+  // must not throw. If cudaFree fails (e.g. context already destroyed) we
+  // log and continue rather than calling std::terminate via an exception
+  // during stack unwinding.
   for (auto &buffer : mBuffers) {
-    checkCudaErrorCode(cudaFree(buffer));
+    auto err = cudaFree(buffer);
+    if (err != cudaSuccess) {
+      spdlog::error("cudaFree failed in ~Engine: {} ({})",
+                    cudaGetErrorName(err), cudaGetErrorString(err));
+    }
   }
 
-  checkCudaErrorCode(cudaStreamDestroy(mInferenceCudaStream));
+  if (mInferenceCudaStream) {
+    auto err = cudaStreamDestroy(mInferenceCudaStream);
+    if (err != cudaSuccess) {
+      spdlog::error("cudaStreamDestroy failed in ~Engine: {} ({})",
+                    cudaGetErrorName(err), cudaGetErrorString(err));
+    }
+  }
 
   mBuffers.clear();
 }
@@ -173,11 +186,7 @@ void Engine::load() {
   // Create the cuda stream that will be used for inference
   checkCudaErrorCode(cudaStreamCreate(&mInferenceCudaStream));
 
-  // Create a cuda stream
-  cudaStream_t stream;
-  checkCudaErrorCode(cudaStreamCreate(&stream));
-
-  // Allocate GPU memory for input and output buffers
+  // Allocate GPU memory for input and output buffers.
   mOutputLengths.clear();
   mTensorMetadata.clear();
   mTensorMetadata.reserve(mEngine->getNbIOTensors());
@@ -227,7 +236,7 @@ void Engine::load() {
       checkCudaErrorCode(
         cudaMallocAsync(&mBuffers[i],
           inputLen,
-          stream
+          mInferenceCudaStream
         )
       );
     } else if (tensorType == TensorIOMode::kOUTPUT) {
@@ -252,16 +261,15 @@ void Engine::load() {
       checkCudaErrorCode(cudaMallocAsync(
           &mBuffers[i], 
           outputLen,
-          stream));
+          mInferenceCudaStream));
     } else {
       throw std::runtime_error(
           "Error, IO Tensor is neither an input or output!");
     }
   }
 
-  // Synchronize and destroy the cuda stream
-  checkCudaErrorCode(cudaStreamSynchronize(stream));
-  checkCudaErrorCode(cudaStreamDestroy(stream));
+  // Ensure all async allocations are complete before returning.
+  checkCudaErrorCode(cudaStreamSynchronize(mInferenceCudaStream));
 }
 
 rust::Vec<OutputTensor> Engine::infer(const rust::Vec<InputTensor> &input) {
@@ -337,8 +345,9 @@ rust::Vec<OutputTensor> Engine::infer(const rust::Vec<InputTensor> &input) {
                                       cudaMemcpyHostToDevice, mInferenceCudaStream));
   }
 
-  checkCudaErrorCode(cudaStreamSynchronize(mInferenceCudaStream));
-  
+  // No pre-enqueue sync needed: CUDA stream ordering guarantees H2D copies
+  // complete before enqueueV3 kernels begin. See README.md for details.
+
   // Ensure all dynamic bindings have been defined
   if (!mContext->allInputDimensionsSpecified()) {
     throw std::runtime_error("Error, not all required dimensions specified.");
@@ -378,12 +387,12 @@ rust::Vec<OutputTensor> Engine::infer(const rust::Vec<InputTensor> &input) {
     
     const auto outputLen = batchSize * mOutputLengths[outputIdx];
     
-    // Create output tensor
+    // Create output tensor with bulk-allocated buffer.
     OutputTensor output;
     size_t copySize = outputLen * metadata.dataTypeSize;
     output.name = metadata.name;
     output.dtype = toTensorDataType(metadata.dataType);
-    resize(output.data, copySize);
+    output.data = new_output_buffer(copySize);
     
     // Copy data from GPU buffer
     checkCudaErrorCode(cudaMemcpyAsync(output.data.data(), 

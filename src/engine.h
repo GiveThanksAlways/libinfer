@@ -98,6 +98,7 @@ public:
   size_t get_num_outputs() const;
 
 private:
+
   // Tensor metadata stored at construction time
   struct TensorMetadata {
     std::string name;
@@ -125,7 +126,7 @@ private:
   std::unique_ptr<nvinfer1::IExecutionContext> mContext = nullptr;
   Logger mLogger;
 
-  cudaStream_t mInferenceCudaStream;
+  cudaStream_t mInferenceCudaStream = nullptr;
 
   // Options values.
   const std::string kEnginePath;
