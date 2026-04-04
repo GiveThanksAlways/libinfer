@@ -1,6 +1,6 @@
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     flake-utils.url = "github:numtide/flake-utils";
     jetpack-nixos.url = "github:anduril/jetpack-nixos";
   };
@@ -13,14 +13,18 @@
     in
     flake-utils.lib.eachSystem supported-systems (system:
       let
-        pkgs = import nixpkgs { 
-          inherit system; 
+        pkgs = import nixpkgs {
+          inherit system;
           config.allowUnfree = true;
         };
         cudaPackages = if system == "aarch64-linux" then jetpack-nixos.legacyPackages.aarch64-linux.cudaPackages else pkgs.cudaPackages;
         tensorrt = if system == "aarch64-linux" then jetpack-nixos.legacyPackages.aarch64-linux.cudaPackages.tensorrt else pkgs.cudaPackages.tensorrt;
-        l4t-cuda = jetpack-nixos.legacyPackages.aarch64-linux.l4t-cuda;
         inherit (cudaPackages) cudatoolkit cudnn cuda_cudart;
+
+        python = pkgs.python3.withPackages (ps: with ps; [
+          numpy
+          onnx
+        ]);
 
         inputs = with pkgs; [
           bacon
@@ -41,6 +45,7 @@
           spdlog
           fmt
           cxx-rs
+          python
         ];
 
         libs = pkgs.lib.makeLibraryPath (with pkgs; [
@@ -50,29 +55,35 @@
           cudaPackages.cuda_nvrtc
           libGL
           glib
-          glibc
           zlib
           tensorrt.lib
           cudnn
           cuda_cudart
+          spdlog
+          fmt
         ]);
+
+        includes = pkgs.lib.makeSearchPath "include" [
+          pkgs.glibc.dev
+        ];
       in
       {
         devShells = {
-          default = pkgs.mkShell rec {
+          default = pkgs.mkShell {
             nativeBuildInputs = inputs;
-            LIBCLANG_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.libclang.lib}/lib/";
+            LIBCLANG_PATH = "${pkgs.libclang.lib}/lib/";
             TENSORRT_LIBRARIES = "${tensorrt.lib}/lib";
             CUDA_INCLUDE_DIRS = "${cudatoolkit}/include";
             CUDA_LIBRARIES = "${cudatoolkit}/lib";
             LD_LIBRARY_PATH = libs;
-            CPLUS_INCLUDE_PATH = "${pkgs.gcc}/include/c++/${pkgs.gcc.version}:${pkgs.gcc}/include/c++/${pkgs.gcc.version}/x86_64-unknown-linux-gnu:${pkgs.glibc.dev}/include";
-            C_INCLUDE_PATH = "${pkgs.glibc.dev}/include";
+            LIBRARY_PATH = libs;
+            CPLUS_INCLUDE_PATH = "${pkgs.gcc}/include/c++/${pkgs.gcc.version}:${pkgs.gcc}/include/c++/${pkgs.gcc.version}/${pkgs.stdenv.hostPlatform.config}:${includes}";
+            C_INCLUDE_PATH = includes;
             shellHook = ''
               export CC="clang"
               export CXX="clang++"
             '';
-            
+
           };
         };
       });
